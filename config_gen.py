@@ -1,7 +1,12 @@
 import streamlit as st
+import pandas as pd
 import json
+import requests
+import zipfile
+import gzip
+import io
 
-# Define available transformations and their parameter requirements
+# Transformation actions and their parameters
 TRANSFORMATION_ACTIONS = {
     "select_columns": {
         "display_name": "Select Columns",
@@ -54,132 +59,112 @@ TRANSFORMATION_ACTIONS = {
     }
 }
 
-def get_parameter_value(param_type, label, options, key, columns=None):
-    """Get parameter value based on type"""
-    if param_type == "multiselect":
-        return st.multiselect(label, options=columns if columns else options, key=key)
-    elif param_type == "select":
-        return st.selectbox(label, options=options if options else columns, key=key)
-    elif param_type == "text":
-        return st.text_input(label, key=key)
-    return None
-
-def create_transformation_form(index, columns):
-    """Create a form section for a single transformation"""
-    st.subheader(f"Transformation {index + 1}")
+def main():
+    # Streamlit app to configure WMS file details
+    st.title("WMS File Configuration Tool")
     
-    # Action selection for this transformation
-    action = st.selectbox(
-        "Action Type",
-        options=list(TRANSFORMATION_ACTIONS.keys()),
-        format_func=lambda x: TRANSFORMATION_ACTIONS[x]["display_name"],
-        key=f"action_type_{index}"
-    )
+    # Form fields for initial file configuration
+    st.subheader("Initial File Configuration")
+    file_type = st.selectbox("File Type", ["file", "zip", "gz"], index=0)
+    file_format = st.selectbox("File Format", ["csv", "xls", "xlsx"], index=0)
+    encoding = st.selectbox("Encoding", ["utf-8", "ascii", "iso-8859-1"])
+    delimiter = st.selectbox("Delimiter", [",", "|", ":", "\t"], index=0)
+    skip_rows = st.number_input("Skip Rows", value=0, min_value=0)
     
-    # Get the parameters for this action
-    action_params = TRANSFORMATION_ACTIONS[action]["parameters"]
-    parameters = {}
-    
-    # Create inputs for each parameter
-    for param_name, param_config in action_params.items():
-        param_type = param_config["type"]
-        param_label = param_config["label"]
-        param_options = param_config.get("options", None)
-        param_key = f"{action}_{param_name}_{index}"
+    # Upload CSV file
+    uploaded_file = st.file_uploader("Upload a File", type=["csv", "xlsx", "zip", "gz"])
+    df = None
+    if uploaded_file is not None:
+        try:
+            # Read uploaded file based on given configurations
+            if file_type == "file":
+                if file_format == "csv":
+                    df = pd.read_csv(uploaded_file, encoding=encoding, delimiter=delimiter, skiprows=skip_rows)
+                elif file_format in ["xls", "xlsx"]:
+                    df = pd.read_excel(uploaded_file, skiprows=skip_rows)
+            elif file_type == "zip":
+                with zipfile.ZipFile(uploaded_file) as z:
+                    # Assuming there's only one file in the zip
+                    file_name = z.namelist()[0]
+                    with z.open(file_name) as f:
+                        if file_format == "csv":
+                            df = pd.read_csv(f, encoding=encoding, delimiter=delimiter, skiprows=skip_rows)
+                        elif file_format in ["xls", "xlsx"]:
+                            df = pd.read_excel(f, skiprows=skip_rows)
+            elif file_type == "gz":
+                with gzip.open(uploaded_file, 'rt', encoding=encoding) as f:
+                    if file_format == "csv":
+                        df = pd.read_csv(f, delimiter=delimiter, skiprows=skip_rows)
         
-        value = get_parameter_value(param_type, param_label, param_options, param_key, columns)
-        if value is not None:
-            parameters[param_name] = value
+            # Display the dataframe preview
+            st.write("Uploaded file preview:")
+            st.dataframe(df.head())
+        except Exception as e:
+            st.error(f"Error reading file: {e}")
     
-    return {
-        "action": action,
-        "parameters": parameters
-    }
-
-def create_config_form():
-    st.title("WMS File Parsing Configuration")
-    
-    with st.form("config_form"):
-        # File Configuration Section
-        st.subheader("File Configuration")
-        file_type = st.selectbox("File Type", ["file", "zip", "gz"], key="file_type")
-        file_format = st.selectbox("File Format", ["csv", "xls", "xlsx"], key="file_format")
-        encoding = st.selectbox("Encoding", ["utf-8", "ascii", "iso-8859-1"], key="encoding")
-        delimiter = st.selectbox("Delimiter", [",", "|", ":", "\t"], key="delimiter")
-        skip_rows = st.number_input("Skip Rows", min_value=0, value=0, key="skip_rows")
-        
-        # Column Names Input Section
-        st.subheader("Column Names")
-        columns_input = st.text_area(
-            "Enter column names (one per line)",
-            height=100,
-            help="Enter each column name on a new line"
-        )
-        
-        # Convert input text to list of columns
-        columns = [col.strip() for col in columns_input.split('\n') if col.strip()]
-        
-        if columns:
-            st.write(f"Number of columns detected: {len(columns)}")
+        if df is not None:
+            # Extract column names
+            columns = df.columns.tolist()
             
-            # Transformations Section
+            # Transformation Configuration
             st.subheader("Transformations")
-            num_transformations = st.number_input(
-                "Number of Transformations",
-                min_value=1,
-                max_value=10,
-                value=1,
-                key="num_transformations"
-            )
+            if "transformations" not in st.session_state:
+                st.session_state["transformations"] = []
             
-            # Create forms for each transformation
-            transformations = []
-            for i in range(num_transformations):
-                transformation = create_transformation_form(i, columns)
-                transformations.append(transformation)
-                if i < num_transformations - 1:
-                    st.markdown("---")
-        else:
-            st.warning("Please enter column names to configure transformations.")
-            transformations = []
-        
-        submitted = st.form_submit_button("Generate Configuration")
-        
-        if submitted and columns:
-            # Clean up the transformations to remove empty values and ensure proper format
-            cleaned_transformations = []
-            for t in transformations:
-                # Remove any empty or None values from parameters
-                cleaned_params = {k: v for k, v in t["parameters"].items() if v is not None and v != []}
-                if cleaned_params:
-                    cleaned_transformations.append({
-                        "action": t["action"],
-                        "parameters": cleaned_params
-                    })
+            action = st.selectbox("Select Transformation", list(TRANSFORMATION_ACTIONS.keys()), key="action_select")
+            parameters = {}
+            action_config = TRANSFORMATION_ACTIONS.get(action, {})
+            for param, param_details in action_config.get("parameters", {}).items():
+                param_type = param_details.get("type")
+                if param_type == "multiselect":
+                    parameters[param] = st.multiselect(param_details.get("label", param), columns, key=f"{action}_{param}")
+                elif param_type == "select" and "options" in param_details:
+                    parameters[param] = st.selectbox(param_details.get("label", param), param_details.get("options"), key=f"{action}_{param}")
+                elif param_type == "select":
+                    parameters[param] = st.selectbox(param_details.get("label", param), columns, key=f"{action}_{param}")
+                elif param_type == "text":
+                    parameters[param] = st.text_input(param_details.get("label", param), key=f"{action}_{param}")
+                elif param_type == "number":
+                    parameters[param] = st.number_input(param_details.get("label", param), min_value=0, key=f"{action}_{param}")
             
-            config = {
-                "type": "wms-file-parsing",
-                "config": {
-                    "file_type": file_type,
-                    "file_format": file_format,
-                    "encoding": encoding,
-                    "delimiter": delimiter,
-                    "skip_rows": skip_rows,
-                    "transformations": cleaned_transformations
+            if st.button("Add Transformation", key="add_transformation"):
+                transformation = {"action": action, "parameters": parameters}
+                st.session_state["transformations"].append(transformation)
+            
+            # Display current transformations
+            st.write("Current Transformations:")
+            for idx, t in enumerate(st.session_state["transformations"]):
+                st.text(json.dumps(t, indent=2))
+                if st.button(f"Delete Transformation {idx+1}", key=f"delete_transformation_{idx}"):
+                    st.session_state["transformations"].pop(idx)
+                    st.experimental_rerun()
+            
+            # Submit Configuration
+            if st.button("Submit Configuration", key="submit_config"):
+                config = {
+                    "type": "wms-file-parsing",
+                    "config": {
+                        "file_type": file_type,
+                        "file_format": file_format,
+                        "encoding": encoding,
+                        "delimiter": delimiter,
+                        "skip_rows": skip_rows,
+                        "transformations": st.session_state["transformations"]
+                    }
                 }
-            }
-            
-            # Display the generated configuration
-            st.subheader("Generated Configuration")
-            st.json(json.dumps(config, indent=2))
-            
-            # Provide download option
-            st.download_button(
-                label="Download Configuration",
-                data=json.dumps(config, indent=2),
-                file_name="wms_config.json",
-                mime="application/json"
-            )
+                # Display JSON configuration
+                st.write("Generated Configuration JSON:")
+                st.text(json.dumps(config, indent=2))
+                
+                # Optional: Send to Azure Function
+                # azure_function_url = st.text_input("Azure Function URL")
+                # if azure_function_url:
+                #     response = requests.post(azure_function_url, json=config)
+                #     st.write(f"Azure Function Response Status Code: {response.status_code}")
+                #     if response.ok:
+                #         st.success("Configuration successfully sent to Azure Function.")
+                #     else:
+                #         st.error("Failed to send configuration to Azure Function.")
 
 if __name__ == "__main__":
-    create_config_form()
+    main()
